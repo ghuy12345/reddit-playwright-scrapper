@@ -119,12 +119,6 @@ app.get("/reddit-thread", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Reddit Playwright scraper listening on port", PORT);
-});
-
-
 
 
 // --- Amazon helpers ---
@@ -260,4 +254,11 @@ app.get("/amazon-reviews", async (req, res) => {
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
+});
+
+
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Playwright scraper listening on port", PORT);
 });
