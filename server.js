@@ -5,117 +5,136 @@ const app = express();
 
 // --- CONFIGURATION ---
 
-// 1. ADD YOUR PROXIES HERE
-// We added 'http://' which is required for Playwright.
-// Since this is a rotating gateway, one entry is sufficient.
+// Your Residential Proxy (Added automatically)
 const PROXIES = [
   "http://260102Tf4fe-resi-US:rC5a0zqL5dYMNtE@ca.proxy-jet.io:1010"
 ];
 
-// 2. FORCE OLD REDDIT (Often helps with parsing/blocking)
 const FORCE_OLD_REDDIT = true;
 
 // ---------------------
 
+// 1. ROOT PAGE (Fixes "Cannot GET /")
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Reddit Playwright scraper running",
-    usage: "/reddit-thread?url=<reddit_thread_url>"
+    message: "Reddit Playwright scraper is ONLINE",
+    endpoints: {
+      scrape: "GET /reddit-thread?url=<reddit_thread_url>",
+      debug_ip: "GET /check-ip",
+      health: "GET /health"
+    }
   });
 });
 
+// 2. HEALTH CHECK
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// 3. IP DEBUGGER (Test if proxies are working)
+app.get("/check-ip", async (req, res) => {
+  let browser;
+  try {
+    const proxyUrl = PROXIES.length > 0 
+      ? PROXIES[Math.floor(Math.random() * PROXIES.length)] 
+      : null;
+
+    console.log("Checking IP with proxy:", proxyUrl || "None");
+
+    const launchOptions = { 
+      headless: true,
+      args: [
+        "--no-sandbox", 
+        "--disable-setuid-sandbox", 
+        "--disable-blink-features=AutomationControlled"
+      ]
+    };
+    
+    if (proxyUrl) {
+      launchOptions.proxy = { server: proxyUrl };
+    }
+
+    browser = await chromium.launch(launchOptions);
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    
+    // Check IP via external service
+    await page.goto("https://api.ipify.org?format=json", { timeout: 30000 });
+    const content = await page.evaluate(() => document.body.innerText);
+
+    res.json({
+      message: "Proxy Connection Test",
+      usingProxy: !!proxyUrl,
+      proxyAddress: proxyUrl ? "HIDDEN (Residential)" : "None",
+      // If this IP matches your proxy provider, it works!
+      externalIpSeenByWebsites: JSON.parse(content).ip 
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: String(err.message) });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 function normalizeToJsonUrl(inputUrl) {
   let urlStr = String(inputUrl || "").trim();
-
-  // Remove zero-width chars
-  urlStr = urlStr.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  urlStr = urlStr.replace(/[\u200B-\u200D\uFEFF]/g, ""); // Remove invisible chars
   
-  // Basic validity check
-  if (!urlStr.startsWith("http")) {
-    urlStr = "https://" + urlStr;
-  }
+  if (!urlStr.startsWith("http")) urlStr = "https://" + urlStr;
 
   try {
     const u = new URL(urlStr);
-    
-    // Force old.reddit.com if configured
-    if (FORCE_OLD_REDDIT) {
-      u.hostname = "old.reddit.com";
-    }
-
-    // Ensure it ends in .json
+    if (FORCE_OLD_REDDIT) u.hostname = "old.reddit.com";
     if (!u.pathname.endsWith(".json")) {
-      // Remove trailing slash if present before appending
-      if (u.pathname.endsWith("/")) {
-        u.pathname = u.pathname.slice(0, -1); 
-      }
-      u.pathname += ".json";
+       if (u.pathname.endsWith("/")) u.pathname = u.pathname.slice(0, -1);
+       u.pathname += ".json";
     }
-
-    // Clear query params to keep it clean
     u.search = "";
-    
     return u.toString();
   } catch (e) {
-    // Fallback if URL parsing fails
     return inputUrl + ".json";
   }
 }
 
+// 4. THE SCRAPER (The main logic)
 app.get("/reddit-thread", async (req, res) => {
   const inputUrl = req.query.url;
-  if (!inputUrl) {
-    return res.status(400).json({
-      error: "Missing query param: ?url=<reddit_thread_url>"
-    });
-  }
+  if (!inputUrl) return res.status(400).json({ error: "Missing ?url= parameter" });
 
   const jsonUrl = normalizeToJsonUrl(inputUrl);
   
-  // Pick a random proxy
+  // Pick Proxy
   const proxyUrl = PROXIES.length > 0 
     ? PROXIES[Math.floor(Math.random() * PROXIES.length)] 
     : null;
 
-  console.log(`Scraping: ${jsonUrl} | Proxy: ${proxyUrl ? "Yes" : "No"}`);
+  console.log(`Scraping: ${jsonUrl}`);
 
   let browser;
   try {
-    // Launch Options
     const launchOptions = {
       headless: true,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-blink-features=AutomationControlled", // Hides navigator.webdriver
+        "--disable-blink-features=AutomationControlled", 
         "--disable-gpu"
       ]
     };
 
-    // Inject Proxy if available
-    if (proxyUrl) {
-      launchOptions.proxy = {
-        server: proxyUrl
-      };
-    }
+    if (proxyUrl) launchOptions.proxy = { server: proxyUrl };
 
     browser = await chromium.launch(launchOptions);
 
     const context = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-      locale: 'en-US',
-      timezoneId: 'America/New_York'
     });
 
     const page = await context.newPage();
 
-    // Navigate
     const response = await page.goto(jsonUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60000
@@ -123,30 +142,23 @@ app.get("/reddit-thread", async (req, res) => {
 
     const status = response ? response.status() : null;
 
-    // Handle Blocks (403/429/500)
     if (status && status >= 400) {
       const bodyText = await page.content().catch(() => "");
-      console.error(`Blocked or Error ${status} on ${jsonUrl}`);
-      
       return res.status(502).json({
-        error: `Reddit returned HTTP ${status}`,
+        error: `Reddit Blocked/Error: ${status}`,
         jsonUrl,
-        proxyUsed: !!proxyUrl,
-        bodyPreview: bodyText.slice(0, 500) // First 500 chars usually contain the block msg
+        bodyPreview: bodyText.slice(0, 500)
       });
     }
 
-    // Extract Text
     const jsonText = await page.evaluate(() => document.body.innerText || "");
 
-    // Parse JSON
     let data;
     try {
       data = JSON.parse(jsonText);
     } catch (err) {
       return res.status(500).json({
         error: "Failed to parse Reddit JSON",
-        jsonUrl,
         parseError: String(err),
         bodyPreview: jsonText.slice(0, 1000)
       });
@@ -156,18 +168,13 @@ app.get("/reddit-thread", async (req, res) => {
 
   } catch (err) {
     console.error("Scrape error:", err);
-    return res.status(500).json({
-      error: String(err?.message || err),
-      jsonUrl
-    });
+    return res.status(500).json({ error: String(err?.message || err) });
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Reddit Playwright scraper listening on port", PORT);
+  console.log("Reddit Scraper listening on port", PORT);
 });
